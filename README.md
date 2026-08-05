@@ -1,177 +1,133 @@
-<div align="center">
-  <img src="docs/source/_static/lxt_logo.png" width="300"/>
+# lxt-efficient: LXT reduced to the efficient core
 
-  <h3>Layer-wise Relevance Propagation for Transformers</h3>
-  <p><i>Fast, faithful explanations for transformer models with a single backward pass</i></p>
-  <p><i></i></p>
+**This is a fork. The original project is [LRP-eXplains-Transformers (LXT)](https://github.com/rachtibat/LRP-eXplains-Transformers)**
+by Fraunhofer HHI. [PyPI: `lxt`](https://pypi.org/project/lxt/) ·
+[docs](https://lxt.readthedocs.io) · [AttnLRP, ICML 2024](https://proceedings.mlr.press/v235/achtibat24a.html).
+**If you are looking for LXT itself, meaning the model zoo, the explicit implementation and the
+tutorials, use upstream, not this.** All credit for the method and the code belongs there. This fork
+adds no functionality.
 
-  [![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white)](https://pytorch.org)
-  [![Read the Docs](https://img.shields.io/badge/-Docs-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white)](https://lxt.readthedocs.io)
-  [![License](https://img.shields.io/badge/License-BSD_3--Clause-green.svg?style=for-the-badge)](https://opensource.org/licenses/BSD-3-Clause)
-  [![Downloads](https://img.shields.io/pypi/dm/lxt.svg?style=for-the-badge)](https://pypi.org/project/lxt/)
-</div>
+What it is: LXT cut down to the parts of `lxt.efficient` that do not import `transformers`, namely
+the LRP rules, the autograd patches, and the zennit interop. 541 lines across 6 modules instead of
+13,814 across 30, one required runtime dependency instead of eight, zero `transformers` imports.
 
+## Why this fork exists
 
-## Table of Contents
-- [What is LXT?](#-what-is-lxt)
-- [Getting Started](#getting-started)
-- [Supported Models](#-supported-models)
-- [How LXT Works](#how-lxt-works)
-- [Documentation](#documentation)
-- [Citation](#citation)
+Upstream LXT couples the whole package to a specific `transformers` version, and the coupling is
+load-bearing for code that only wants the rules:
 
-## Accelerating eXplainable AI research for LLMs & ViTs
+- **A single unrelated model module can take down the entire package.**
+  `lxt/efficient/models/bert.py` imports `find_pruneable_heads_and_indices` and
+  `prune_linear_layer`, which `transformers 5` removed. Because `models/__init__.py` eagerly imports
+  every model module and `efficient/__init__.py` imports `core`, which imports `models`, that one
+  `ImportError` makes `import lxt.efficient` fail outright, even for consumers that never touch
+  BERT. There is no failure isolation: an unsupported architecture is indistinguishable from a
+  broken install.
+- **The coupling is structural, not accidental.** `bert.py` is a 2033-line modified copy of
+  `transformers`' `modeling_bert`, 43% of LXT's source. Carrying a snapshot of another library's
+  internals means breakage on that library's releases is expected, not bad luck.
+- **Eight runtime dependencies** (including `bitsandbytes` and `open_clip_torch`) for consumers that
+  use LXT as a rule library and bring their own patch maps.
+- **Upstream has had no commits in roughly a year** and no `transformers 5`-compatible release, so
+  waiting is not a strategy.
 
-#### ✨ What is LXT?
+Deleting the model zoo and the explicit implementation removes the coupling by construction rather
+than shimming around it: the remaining modules cannot break on a future `transformers` release
+because they never import it. The trade is that you must supply your own patch maps, which is
+already the case for anyone using LXT as a rule library.
 
-LXT makes black-box transformer models explainable by precisely revealing how much each input token and individual neuron contribute to the final prediction logit. Unlike standard gradient-based methods, which can be noisy or unreliable, LXT delivers faithful attributions using AttnLRP, a backpropagation-based technique that corrects gradient flow through non-linearities. Best of all, it requires only a single backward pass.
+A fix for the failure-isolation defect (per-model `try/except ImportError`, or moving the imports
+inside `get_default_map`) belongs upstream and is worth contributing separately. It is orthogonal
+to this reduction.
 
-See the dramatic improvement in explanation quality on Gemma 3 (4B):
+Forked from upstream commit `0b91031` (LXT 2.1). The import package is still named `lxt`, so
+downstream code needs no changes:
 
-<div align="center">
-  <table>
-    <tr>
-      <th>Input×Gradient (Traditional)</th>
-      <th>AttnLRP (Our Method)</th>
-    </tr>
-    <tr>
-      <td>
-        <img src="docs/source/_static/gemma_3_4b_it_gradient.jpg" alt="Input×Gradient results showing noisy, scattered attributions" width="400"/>
-        <br>
-        <em>Noisy, scattered attributions</em>
-      </td>
-      <td>
-        <img src="docs/source/_static/gemma_3_4b_it_LXT.jpg" alt="AttnLRP results showing clean, semantically coherent attributions" width="400"/>
-        <br>
-        <em>Clean, semantically coherent attributions</em>
-      </td>
-    </tr>
-  </table>
-</div>
+```python
+from lxt.efficient import monkey_patch, monkey_patch_zennit
+from lxt.efficient import patches
+from lxt.efficient.patches import divide_gradient, identity_rule_implicit
+import lxt.efficient.zennit_patches as zp
+```
 
-#### 🔥 Highly efficient & Faithful Attributions
-
-Attention-aware LRP (AttnLRP) **outperforms** gradient-, decomposition- and perturbation-based methods, provides faithful attributions for the **entirety** of a black-box transformer model while scaling in computational complexity $O(1)$ and memory requirements $O(\sqrt{N})$ with respect to the number of layers.
-
-#### 🔎 Latent Feature Attribution & Visualization
-Since we get relevance values for each single neuron in the model as a by-product, we know exactly how important each neuron is for the prediction of the model. Combined with Activation Maximization, we can label neurons or SAE features in LLMs and even steer the generation process of the LLM by activating specialized knowledge neurons in latent space!
-
-#### 📚 Paper
-For the mathematical details and foundational work, please take a look at our paper:  
-[Achtibat, et al. “AttnLRP: Attention-Aware Layer-Wise Relevance Propagation for Transformers.” ICML 2024.](https://proceedings.mlr.press/v235/achtibat24a.html)  
-
-#### 🏆 Hall of Fame
-A small collection of papers that have utilized LXT:
-
-- [Arras, et al. “Close Look at Decomposition-based XAI-Methods for Transformer Language Models.” arXiv preprint, 2025.](https://arxiv.org/abs/2502.15886)
-- [Pan, et al. “The Hidden Dimensions of LLM Alignment: A Multi-Dimensional Safety Analysis.” arXiv preprint, 2025.](https://arxiv.org/abs/2502.09674)
-- [Hu, et al. “LRP4RAG: Detecting Hallucinations in Retrieval-Augmented Generation via Layer-wise Relevance Propagation“ arXiv preprint, 2024.](https://arxiv.org/abs/2408.15533)
-- [Sarti, et al. “Quantifying the Plausibility of Context Reliance in Neural Machine Translation.” ICLR 2024.](https://arxiv.org/abs/2310.01188)
-[![Demo](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/gsarti/mirage)
-
-
-#### 📄 License
-This project is licensed under the BSD-3 Clause License, which means that LRP is a patented technology that can only be used free of charge for personal and scientific purposes.
-
-## Getting Started 
-### 🛠️ Installation 
+## Installation
 
 ```bash
-pip install lxt
+pip install "lxt-efficient[zennit] @ git+https://github.com/jim-berend/LXT-Efficient@v2.1.0-efficient"
 ```
 
-Tested with: `transformers==4.52.4`, `torch==2.6.0`, `python==3.11`
+`lxt-efficient` and upstream `lxt` both provide the `lxt` import package and cannot be installed
+side by side, so remove `lxt` first.
 
-### 🚀 Quickstart with 🤗 LLaMA & many more
-You find example scripts in the `examples/*` directory. For an in-depth tutorial, take a look at the [Quickstart in the Documentation](https://lxt.readthedocs.io/en/latest/quickstart.html).
+## Dependencies
 
-To get an overview, you can keep reading below ⬇️
+| | |
+| --- | --- |
+| Required | `torch` |
+| Extra `zennit` | `zennit`, needed for `monkey_patch_zennit`. The import is guarded, so the package remains importable without it (with a warning) |
+| Python | `>=3.10` |
 
-### 🧩 Supported Models
+Upstream declares `torch`, `transformers`, `accelerate`, `tabulate`, `matplotlib`, `bitsandbytes`,
+`open_clip_torch` and `zennit`. All but `torch` and `zennit` were needed only by the removed
+subsystems.
 
-| Model Family | Status |
-|--------------|--------|
-| 🦙 LLaMA 2/3 | ✅ |
-| ✨ Gemma 3 | ✅ |
-| 🤖 Qwen 2 | ✅ |
-| 🧠 Qwen 3 | 🧪 Attribution skewed toward first token |
-| 🔤 BERT | ✅ |
-| 🤖 GPT-2 | ✅ Best paired with contrastive explanations |
-| 🎨 Vision Transformers | ✅ |
+## What this fork contains
 
-
-## How LXT Works
-
-Layer-wise Relevance Propagation is a rule-based backpropagation algorithm. This means, that we can implement LRP in a single backward pass!
-For this, LXT offers two different approaches:
-
-### 1. Efficient Implementation
-Uses a Input*Gradient formulation, which simplifies LRP to a standard & fast gradient computation via monkey patching the model class.
-
-
-```python
-from lxt.efficient import monkey_patch
-
-# Patch module first
-monkey_patch(your_module)
-
-# Forward pass with gradient tracking
-outputs = model(inputs_embeds=input_embeds.requires_grad_())
-
-# Backward pass
-outputs.logits[...].backward()
-
-# Get relevance at *ANY LAYER* in your model. Simply multiply the activation * gradient!
-# here for the input embeddings:
-relevance = (input_embeds * input_embeds.grad).sum(-1)
 ```
-This is the **recommended approach** for most users as it's significantly faster and easier to use. This implementation technique is introduced in [Arras, et al. “Close Look at Decomposition-based XAI-Methods for Transformer Language Models.” arXiv preprint, 2025.](https://arxiv.org/abs/2502.15886)
- 
-### 2. Mathematical Explicit Implementation
-This was used in the original [ICML 2024 paper](https://proceedings.mlr.press/v235/achtibat24a.html). It's more complex and slower, but useful for understanding the mathematical foundations of LRP.
-
-
-To achieve this, we have implemented [custom PyTorch autograd Functions](https://pytorch.org/tutorials/beginner/examples_autograd/two_layer_net_custom_function.html) for commonly used operations in transformers. These functions behave identically in the forward pass, but substitute the gradient with LRP attributions in the backward pass. To compute the $\varepsilon$-LRP rule for a linear function $y = W x + b$, you can simply write
-```python
-import lxt.explicit.functional as lf
-
-y = lf.linear_epsilon(x.requires_grad_(), W, b)
-y.backward(y)
-
-relevance = x.grad
+lxt/efficient/patches.py         # autograd patch functions
+lxt/efficient/rules.py           # LRP rules as torch.autograd.Function
+lxt/efficient/zennit_patches.py  # zennit interop (the zennit import is guarded)
+lxt/efficient/core.py            # monkey_patch
 ```
 
-There are also "super-functions" that wrap an arbitrary nn.Module and compute LRP rules via automatic vector-Jacobian products! These rules are simple to attach to models:
+## What was removed, and why
 
-```python
-from lxt.explicit.core import Composite
-import lxt.explicit.rules as rules
+| Removed | Reason |
+| --- | --- |
+| `lxt/efficient/models/` | The bundled per-model patch maps. Every `transformers` import in `lxt.efficient` lives here, including `models/bert.py`, whose import of `find_pruneable_heads_and_indices` / `prune_linear_layer` fails on `transformers 5` and, through the eager `models/__init__.py`, takes down all of `lxt.efficient` with it. |
+| `lxt/explicit/` | The mathematically explicit LRP implementation. Depends on `transformers.utils.fx`, removed in `transformers 5`. |
+| `lxt/utils.py` | matplotlib heatmap helpers, outside the core. |
+| `docs/`, `examples/`, `tests/`, `.readthedocs.yaml` | Cover the removed subsystems. |
+| `setup.py` | Replaced by `pyproject.toml`. |
 
-model = nn.Sequential(
-  nn.Linear(10, 10),
-  RootMeanSquareNorm(),
-)
+Consumers that want LXT's ready-made Llama/Qwen/Gemma3 maps rather than their own can re-add the
+relevant module from `lxt/efficient/models/`. Each is 20 to 32 lines and imports only its own
+architecture.
 
-Composite({
-  nn.Linear: rules.EpsilonRule,
-  RootMeanSquareNorm: rules.IdentityRule,
-}).register(model)
+## Modifications relative to upstream
 
-print(model)
+Only two source files differ from upstream. `patches.py`, `rules.py` and `zennit_patches.py` are
+byte-identical copies.
+
+- `lxt/efficient/core.py`: dropped `from lxt.efficient.models import get_default_map`.
+  `monkey_patch(module, patch_map, verbose=False)` now takes `patch_map` as a required argument and
+  raises `ValueError` instead of falling back to a bundled default map.
+- `lxt/efficient/__init__.py`: added `__all__`.
+
+Packaging: distribution name `lxt-efficient` (upstream: `lxt`), version `2.1.0`, built with
+hatchling.
+
+## Staying in sync with upstream
+
+```bash
+git fetch upstream && git rebase upstream/main
 ```
-<div align="left">
-  <img src="docs/source/_static/terminal.png" width="400"/>
-</div>
 
+Conflicts are limited to `core.py`, `efficient/__init__.py` and the packaging files.
 
-## Documentation
-[Click here](https://lxt.readthedocs.io) to read the documentation.
+## License and attribution
 
-## Contribution
-Feel free to explore the code and experiment with different datasets and models. We encourage contributions and feedback from the community. We are especially grateful for providing support for new model architectures! 🙏
-
+LXT is copyright 2024 Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V. and the
+authors Reduan Achtibat, Sayed Mohammad Vakilzadeh Hatefi, Maximilian Dreyer, Aakriti Jain, Thomas
+Wiegand, Sebastian Lapuschkin, Wojciech Samek, released under the Clear BSD License. The `LICENSE`
+file and all per-file copyright headers are retained unmodified. This is a modified derivative
+work, and the modifications are listed above. The names of the original authors are not used to
+endorse or promote it. Note that the Clear BSD variant withholds patent rights.
 
 ## Citation
+
+Please cite the original work:
+
 ```
 @InProceedings{pmlr-v235-achtibat24a,
   title = {{A}ttn{LRP}: Attention-Aware Layer-Wise Relevance Propagation for Transformers},
@@ -188,4 +144,6 @@ Feel free to explore the code and experiment with different datasets and models.
 ```
 
 ## Acknowledgements
-The code is heavily inspired by [Zennit](https://github.com/chr5tphr/zennit), a tool for LRP attributions in PyTorch using hooks. Zennit is 100% compatible with the **explicit** version of LXT and offers even more LRP rules 🎉
+
+LXT's code is heavily inspired by [Zennit](https://github.com/chr5tphr/zennit), a tool for LRP
+attributions in PyTorch using hooks.
