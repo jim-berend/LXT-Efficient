@@ -16,7 +16,7 @@
 import sys
 import torch
 from warnings import warn
-from lxt.efficient.rules import stop_gradient, divide_gradient, identity_rule_implicit
+from lxt.efficient.rules import stop_gradient, divide_gradient, identity_rule_implicit, layer_norm_identity
 
 
 def check_already_patched(target_fn, new_fn):
@@ -128,18 +128,15 @@ def layer_norm_forward(self, x):
     On normalization operations, we apply the identity rule.
     It is implemented here by stopping the gradient flow through the variance calculation,
     which is equivalent to the identity rule in a Gradient*Input framework.
+
+    Unlike the other patches in this file, this one is *not* a forward rewrite: it calls the
+    same fused `F.layer_norm` the unpatched module calls and carries the rule in a custom
+    backward, so the patched model's forward values are unchanged. A rewrite here costs real
+    accuracy, because a decomposition cannot reproduce the fused kernel's rounding -- see
+    `lxt.efficient.rules.layer_norm_identity`.
     """
 
-    mean = x.mean(dim=-1, keepdim=True)
-    var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
-    std = (var + self.eps).sqrt()
-    y = (x - mean) / stop_gradient(std)
-    if self.weight is not None:
-        y *= self.weight
-    if self.bias is not None:
-        y += self.bias
-
-    return y
+    return layer_norm_identity(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
 def gated_mlp_forward(self, x):
